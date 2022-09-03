@@ -145,7 +145,7 @@ namespace Unity.RenderStreaming.RuntimeTest
             var streamer = container.test.gameObject.AddComponent<StreamSourceTest>();
 
             Assert.That(streamer.Track, Is.Not.Null);
-            Assert.That(streamer.Senders, Is.Empty);
+            Assert.That(streamer.Transceivers, Is.Empty);
 
             container.test.component.AddComponent(streamer);
             container.Dispose();
@@ -200,7 +200,7 @@ namespace Unity.RenderStreaming.RuntimeTest
             Assert.That(isStartedStream2, Is.True);
 
             Assert.That(receiver.Track, Is.Not.Null);
-            Assert.That(receiver.Receiver, Is.Not.Null);
+            Assert.That(receiver.Transceiver, Is.Not.Null);
 
             yield return new WaitUntil(() => container1.test.component.IsConnected(connectionId));
             yield return new WaitUntil(() => container2.test.component.IsConnected(connectionId));
@@ -218,6 +218,87 @@ namespace Unity.RenderStreaming.RuntimeTest
             container1.Dispose();
             container2.Dispose();
         }
+
+        //todo:: crash in dispose process on standalone linux
+        [UnityTest, Timeout(10000)]
+        [UnityPlatform(exclude = new[]
+        {
+            RuntimePlatform.WindowsEditor, RuntimePlatform.OSXEditor, RuntimePlatform.LinuxEditor,
+            RuntimePlatform.LinuxPlayer
+        })]
+        public IEnumerator FilterCodec()
+        {
+            string connectionId = "12345";
+            var container1 = TestContainer<BroadcastBehaviourTest>.Create("test1");
+            var container2 = TestContainer<SingleConnectionBehaviourTest>.Create("test2");
+
+            var streamer = container1.test.gameObject.AddComponent<StreamSourceTest>();
+            bool isStartedStream1 = false;
+            bool isStoppedStream1 = false;
+            streamer.OnStartedStream += _ => isStartedStream1 = true;
+            streamer.OnStoppedStream += _ => isStoppedStream1 = true;
+            var index = AvailableCodecsUtils.GetAvailableVideoCodecsName().FirstOrDefault(x => x.Value.Contains("VP9")).Key;
+            Assert.That(AvailableCodecsUtils.TryGetAvailableVideoCodec(index, out var capability), Is.True);
+            streamer.FilterVideoCodecs(index);
+
+            container1.test.component.AddComponent(streamer);
+
+            var receiver = container2.test.gameObject.AddComponent<VideoStreamReceiverTest>();
+            bool isStartedStream2 = false;
+            bool isStoppedStream2 = false;
+
+            receiver.OnStartedStream += _ => isStartedStream2 = true;
+            receiver.OnStoppedStream += _ => isStoppedStream2 = true;
+
+            container2.test.component.AddComponent(receiver);
+            container2.test.component.CreateConnection(connectionId);
+            yield return new WaitUntil(() => container2.test.component.ExistConnection(connectionId));
+            container2.test.component.SendOffer(connectionId);
+            yield return new WaitUntil(() => isStartedStream2 && isStartedStream1);
+            Assert.That(isStartedStream1, Is.True);
+            Assert.That(isStartedStream2, Is.True);
+
+            Assert.That(receiver.Track, Is.Not.Null);
+            Assert.That(receiver.Transceiver, Is.Not.Null);
+
+            yield return new WaitUntil(() => container1.test.component.IsConnected(connectionId));
+            yield return new WaitUntil(() => container2.test.component.IsConnected(connectionId));
+
+            RTCCodecStats senderCodecStats = null;
+            while (senderCodecStats == null)
+            {
+                var statsOp = streamer.Transceivers[connectionId].Sender.GetStats();
+                yield return statsOp;
+                Assert.That(statsOp.IsError, Is.False);
+
+                var outboundStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x =>
+                        x is RTCOutboundRTPStreamStats stats && stats.kind == "video") as RTCOutboundRTPStreamStats;
+
+                if (outboundStats == null || string.IsNullOrEmpty(outboundStats.codecId))
+                {
+                    yield return new WaitForSeconds(0.1f);
+                    continue;
+                }
+
+                senderCodecStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x => x.Id == outboundStats.codecId) as RTCCodecStats;
+            }
+            Assert.That(senderCodecStats.mimeType, Is.EqualTo(capability.mimeType));
+            Assert.That(senderCodecStats.sdpFmtpLine, Is.EqualTo(capability.sdpFmtpLine));
+
+            container2.test.component.DeleteConnection(connectionId);
+
+            yield return new WaitUntil(() => isStoppedStream1 && isStoppedStream2);
+            Assert.That(isStoppedStream1, Is.True);
+            Assert.That(isStoppedStream2, Is.True);
+
+            Assert.That(container1.test.component.ExistConnection(connectionId), Is.False);
+            Assert.That(container2.test.component.ExistConnection(connectionId), Is.False);
+
+            container1.Dispose();
+            container2.Dispose();
+        }
     }
 
     class SingleConnectionTest
@@ -228,9 +309,9 @@ namespace Unity.RenderStreaming.RuntimeTest
             MockSignaling.Reset(true);
         }
 
-        //todo:: crash in dispose process on standalone linux
+        //todo:: crash in dispose process on standalone Linux and Android
         [UnityTest, Timeout(10000)]
-        [UnityPlatform(exclude = new[] { RuntimePlatform.LinuxPlayer })]
+        [UnityPlatform(exclude = new[] { RuntimePlatform.LinuxPlayer, RuntimePlatform.Android })]
         public IEnumerator AddStreamSource()
         {
             string connectionId = "12345";
@@ -238,14 +319,14 @@ namespace Unity.RenderStreaming.RuntimeTest
             var streamer = container.test.gameObject.AddComponent<StreamSourceTest>();
 
             Assert.That(streamer.Track, Is.Not.Null);
-            Assert.That(streamer.Senders, Is.Empty);
+            Assert.That(streamer.Transceivers, Is.Empty);
 
             container.test.component.AddComponent(streamer);
             container.test.component.CreateConnection(connectionId);
             yield return new WaitUntil(() => container.test.component.ExistConnection(connectionId));
 
             Assert.That(streamer.Track, Is.Not.Null);
-            Assert.That(streamer.Senders, Is.Not.Empty);
+            Assert.That(streamer.Transceivers, Is.Not.Empty);
 
             container.test.component.DeleteConnection(connectionId);
             yield return new WaitUntil(() => !container.test.component.ExistConnection(connectionId));
@@ -332,7 +413,7 @@ namespace Unity.RenderStreaming.RuntimeTest
             receiver.OnStoppedStream += _ => isStoppedStream1 = true;
 
             Assert.That(receiver.Track, Is.Null);
-            Assert.That(receiver.Receiver, Is.Null);
+            Assert.That(receiver.Transceiver, Is.Null);
 
             container2.test.component.AddComponent(receiver);
             container2.test.component.CreateConnection(connectionId);
@@ -342,7 +423,7 @@ namespace Unity.RenderStreaming.RuntimeTest
             Assert.That(isStartedStream1, Is.True);
 
             Assert.That(receiver.Track, Is.Not.Null);
-            Assert.That(receiver.Receiver, Is.Not.Null);
+            Assert.That(receiver.Transceiver, Is.Not.Null);
 
             container1.test.component.DeleteConnection(connectionId);
             container2.test.component.DeleteConnection(connectionId);
@@ -502,19 +583,21 @@ namespace Unity.RenderStreaming.RuntimeTest
 
             var transceivers1 = container1.instance.GetTransceivers(connectionId).ToList();
             var count1 = transceivers1.Count;
-            Assert.That(count1, Is.EqualTo(2), $"{nameof(transceivers1)} count is {count1}");
+            Assert.That(count1, Is.EqualTo(4), $"{nameof(transceivers1)} count is {count1}");
             Assert.That(transceivers1.Select(x => x.Direction),
                 Is.EquivalentTo(new[]
                 {
-                    RTCRtpTransceiverDirection.SendRecv, RTCRtpTransceiverDirection.SendRecv
+                    RTCRtpTransceiverDirection.SendRecv, RTCRtpTransceiverDirection.SendRecv,
+                    RTCRtpTransceiverDirection.RecvOnly, RTCRtpTransceiverDirection.RecvOnly,
                 }));
             var transceivers2 = container2.instance.GetTransceivers(connectionId).ToList();
             var count2 = transceivers2.Count;
-            Assert.That(count2, Is.EqualTo(2), $"{nameof(transceivers2)} count is {count2}");
+            Assert.That(count2, Is.EqualTo(4), $"{nameof(transceivers2)} count is {count2}");
             Assert.That(transceivers2.Select(x => x.Direction),
                 Is.EquivalentTo(new[]
                 {
-                    RTCRtpTransceiverDirection.SendRecv, RTCRtpTransceiverDirection.SendRecv
+                    RTCRtpTransceiverDirection.SendRecv, RTCRtpTransceiverDirection.SendRecv,
+                    RTCRtpTransceiverDirection.RecvOnly, RTCRtpTransceiverDirection.RecvOnly,
                 }));
 
 
@@ -526,6 +609,216 @@ namespace Unity.RenderStreaming.RuntimeTest
             yield return new WaitUntil(() =>
                 !container1.test.component.ExistConnection(connectionId) &&
                 !container2.test.component.ExistConnection(connectionId));
+
+            container1.Dispose();
+            container2.Dispose();
+        }
+
+        //todo:: crash in dispose process on standalone linux
+        [UnityTest, Timeout(10000)]
+        [UnityPlatform(exclude = new[]
+        {
+            RuntimePlatform.WindowsEditor, RuntimePlatform.OSXEditor, RuntimePlatform.LinuxEditor,
+            RuntimePlatform.LinuxPlayer
+        })]
+        public IEnumerator FilterCodecOnSender()
+        {
+            string connectionId = "12345";
+            var container1 = TestContainer<SingleConnectionBehaviourTest>.Create("test1");
+            var container2 = TestContainer<SingleConnectionBehaviourTest>.Create("test2");
+
+            var streamer = container1.test.gameObject.AddComponent<StreamSourceTest>();
+            bool isStartedStream0 = false;
+            bool isStoppedStream0 = false;
+            streamer.OnStartedStream += _ => isStartedStream0 = true;
+            streamer.OnStoppedStream += _ => isStoppedStream0 = true;
+            var index = AvailableCodecsUtils.GetAvailableVideoCodecsName().FirstOrDefault(x => x.Value.Contains("VP9")).Key;
+            Assert.That(AvailableCodecsUtils.TryGetAvailableVideoCodec(index, out var capability), Is.True);
+            streamer.FilterVideoCodecs(index);
+
+            container1.test.component.AddComponent(streamer);
+            container1.test.component.CreateConnection(connectionId);
+            yield return new WaitUntil(() => container1.test.component.ExistConnection(connectionId));
+
+            yield return new WaitUntil(() => isStartedStream0);
+            Assert.That(isStartedStream0, Is.True);
+
+            var receiver = container2.test.gameObject.AddComponent<VideoStreamReceiverTest>();
+            bool isStartedStream1 = false;
+            bool isStoppedStream1 = false;
+            receiver.OnStartedStream += _ => isStartedStream1 = true;
+            receiver.OnStoppedStream += _ => isStoppedStream1 = true;
+
+            Assert.That(receiver.Track, Is.Null);
+            Assert.That(receiver.Transceiver, Is.Null);
+
+            container2.test.component.AddComponent(receiver);
+            container2.test.component.CreateConnection(connectionId);
+            yield return new WaitUntil(() => container2.test.component.ExistConnection(connectionId));
+
+            yield return new WaitUntil(() => isStartedStream1);
+            Assert.That(isStartedStream1, Is.True);
+
+            Assert.That(receiver.Track, Is.Not.Null);
+            Assert.That(receiver.Transceiver, Is.Not.Null);
+
+            RTCCodecStats senderCodecStats = null;
+            while (senderCodecStats == null)
+            {
+                var statsOp = streamer.Transceivers[connectionId].Sender.GetStats();
+                yield return statsOp;
+                Assert.That(statsOp.IsError, Is.False);
+
+                var outboundStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x =>
+                        x is RTCOutboundRTPStreamStats stats && stats.kind == "video") as RTCOutboundRTPStreamStats;
+
+                if (outboundStats == null || string.IsNullOrEmpty(outboundStats.codecId))
+                {
+                    yield return new WaitForSeconds(0.1f);
+                    continue;
+                }
+
+                senderCodecStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x => x.Id == outboundStats.codecId) as RTCCodecStats;
+            }
+            Assert.That(senderCodecStats.mimeType, Is.EqualTo(capability.mimeType));
+            Assert.That(senderCodecStats.sdpFmtpLine, Is.EqualTo(capability.sdpFmtpLine));
+
+            RTCCodecStats receiverCodecStats = null;
+            while (receiverCodecStats == null)
+            {
+                var statsOp = receiver.Transceiver.Receiver.GetStats();
+                yield return statsOp;
+                Assert.That(statsOp.IsError, Is.False);
+
+                var inboundStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x =>
+                        x is RTCInboundRTPStreamStats stats && stats.kind == "video") as RTCInboundRTPStreamStats;
+
+                if (inboundStats == null || string.IsNullOrEmpty(inboundStats.codecId))
+                {
+                    yield return new WaitForSeconds(0.1f);
+                    continue;
+                }
+
+                receiverCodecStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x => x.Id == inboundStats.codecId) as RTCCodecStats;
+            }
+            Assert.That(receiverCodecStats.mimeType, Is.EqualTo(capability.mimeType));
+            Assert.That(receiverCodecStats.sdpFmtpLine, Is.EqualTo(capability.sdpFmtpLine));
+
+            container1.test.component.DeleteConnection(connectionId);
+            container2.test.component.DeleteConnection(connectionId);
+
+            yield return new WaitUntil(() => isStoppedStream0 && isStoppedStream1);
+            Assert.That(isStoppedStream0, Is.True);
+            Assert.That(isStoppedStream1, Is.True);
+
+            container1.Dispose();
+            container2.Dispose();
+        }
+
+        //todo:: crash in dispose process on standalone linux
+        [UnityTest, Timeout(10000)]
+        [UnityPlatform(exclude = new[]
+        {
+            RuntimePlatform.WindowsEditor, RuntimePlatform.OSXEditor, RuntimePlatform.LinuxEditor,
+            RuntimePlatform.LinuxPlayer
+        })]
+        public IEnumerator FilterCodecOnReceiver()
+        {
+            string connectionId = "12345";
+            var container1 = TestContainer<SingleConnectionBehaviourTest>.Create("test1");
+            var container2 = TestContainer<SingleConnectionBehaviourTest>.Create("test2");
+
+            var streamer = container1.test.gameObject.AddComponent<StreamSourceTest>();
+            bool isStartedStream0 = false;
+            bool isStoppedStream0 = false;
+            streamer.OnStartedStream += _ => isStartedStream0 = true;
+            streamer.OnStoppedStream += _ => isStoppedStream0 = true;
+
+            container1.test.component.AddComponent(streamer);
+            container1.test.component.CreateConnection(connectionId);
+            yield return new WaitUntil(() => container1.test.component.ExistConnection(connectionId));
+
+            yield return new WaitUntil(() => isStartedStream0);
+            Assert.That(isStartedStream0, Is.True);
+
+            var receiver = container2.test.gameObject.AddComponent<VideoStreamReceiverTest>();
+            bool isStartedStream1 = false;
+            bool isStoppedStream1 = false;
+            receiver.OnStartedStream += _ => isStartedStream1 = true;
+            receiver.OnStoppedStream += _ => isStoppedStream1 = true;
+            var index = AvailableCodecsUtils.GetAvailableVideoCodecsName().FirstOrDefault(x => x.Value.Contains("VP9")).Key;
+            Assert.That(AvailableCodecsUtils.TryGetAvailableVideoCodec(index, out var capability), Is.True);
+            receiver.FilterVideoCodecs(index);
+
+            Assert.That(receiver.Track, Is.Null);
+            Assert.That(receiver.Transceiver, Is.Null);
+
+            container2.test.component.AddComponent(receiver);
+            container2.test.component.CreateConnection(connectionId);
+            yield return new WaitUntil(() => container2.test.component.ExistConnection(connectionId));
+
+            yield return new WaitUntil(() => isStartedStream1);
+            Assert.That(isStartedStream1, Is.True);
+
+            Assert.That(receiver.Track, Is.Not.Null);
+            Assert.That(receiver.Transceiver, Is.Not.Null);
+
+            RTCCodecStats senderCodecStats = null;
+            while (senderCodecStats == null)
+            {
+                var statsOp = streamer.Transceivers[connectionId].Sender.GetStats();
+                yield return statsOp;
+                Assert.That(statsOp.IsError, Is.False);
+
+                var outboundStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x =>
+                        x is RTCOutboundRTPStreamStats stats && stats.kind == "video") as RTCOutboundRTPStreamStats;
+
+                if (outboundStats == null || string.IsNullOrEmpty(outboundStats.codecId))
+                {
+                    yield return new WaitForSeconds(0.1f);
+                    continue;
+                }
+
+                senderCodecStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x => x.Id == outboundStats.codecId) as RTCCodecStats;
+            }
+            Assert.That(senderCodecStats.mimeType, Is.EqualTo(capability.mimeType));
+            Assert.That(senderCodecStats.sdpFmtpLine, Is.EqualTo(capability.sdpFmtpLine));
+
+            RTCCodecStats receiverCodecStats = null;
+            while (receiverCodecStats == null)
+            {
+                var statsOp = receiver.Transceiver.Receiver.GetStats();
+                yield return statsOp;
+                Assert.That(statsOp.IsError, Is.False);
+
+                var inboundStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x =>
+                        x is RTCInboundRTPStreamStats stats && stats.kind == "video") as RTCInboundRTPStreamStats;
+
+                if (inboundStats == null || string.IsNullOrEmpty(inboundStats.codecId))
+                {
+                    yield return new WaitForSeconds(0.1f);
+                    continue;
+                }
+
+                receiverCodecStats =
+                    statsOp.Value.Stats.Values.FirstOrDefault(x => x.Id == inboundStats.codecId) as RTCCodecStats;
+            }
+            Assert.That(receiverCodecStats.mimeType, Is.EqualTo(capability.mimeType));
+            Assert.That(receiverCodecStats.sdpFmtpLine, Is.EqualTo(capability.sdpFmtpLine));
+
+            container1.test.component.DeleteConnection(connectionId);
+            container2.test.component.DeleteConnection(connectionId);
+
+            yield return new WaitUntil(() => isStoppedStream0 && isStoppedStream1);
+            Assert.That(isStoppedStream0, Is.True);
+            Assert.That(isStoppedStream1, Is.True);
 
             container1.Dispose();
             container2.Dispose();

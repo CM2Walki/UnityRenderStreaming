@@ -60,6 +60,41 @@ namespace Unity.RenderStreaming
             return m_handler.IsStable(connectionId);
         }
 
+        static RTCRtpTransceiverInit GetTransceiverInit(IStreamSender sender)
+        {
+            RTCRtpTransceiverInit init = new RTCRtpTransceiverInit()
+            {
+                direction = RTCRtpTransceiverDirection.SendRecv,
+            };
+            if (sender is VideoStreamSender videoStreamSender)
+            {
+                init.sendEncodings = new RTCRtpEncodingParameters[]
+                {
+                    new RTCRtpEncodingParameters()
+                    {
+                        active = true,
+                        maxBitrate = (ulong?)videoStreamSender.bitrate * 1000,
+                        minBitrate = (ulong?)videoStreamSender.bitrate * 1000,
+                        maxFramerate = (uint?)videoStreamSender.frameRate,
+                        scaleResolutionDownBy = videoStreamSender.scaleResolutionDown
+                    }
+                };
+            }
+            if (sender is AudioStreamSender audioStreamSender)
+            {
+                init.sendEncodings = new RTCRtpEncodingParameters[]
+                {
+                    new RTCRtpEncodingParameters()
+                    {
+                        active = true,
+                        maxBitrate = audioStreamSender.bitrate == 0 ? null : (ulong?)audioStreamSender.bitrate * 1000,
+                        minBitrate = audioStreamSender.bitrate == 0 ? null : (ulong?)audioStreamSender.bitrate * 1000,
+                    }
+                };
+            }
+            return init;
+        }
+
         /// <summary>
         ///
         /// </summary>
@@ -68,8 +103,9 @@ namespace Unity.RenderStreaming
         /// <returns></returns>
         public virtual void AddSender(string connectionId, IStreamSender sender)
         {
-            var transceiver = m_handler.AddSenderTrack(connectionId, sender.Track);
-            sender.SetSender(connectionId, transceiver.Sender);
+            RTCRtpTransceiverInit init = GetTransceiverInit(sender);
+            var transceiver = m_handler.AddTransceiver(connectionId, sender.Track, init);
+            sender.SetTransceiver(connectionId, transceiver);
         }
 
         /// <summary>
@@ -80,7 +116,7 @@ namespace Unity.RenderStreaming
         public virtual void RemoveSender(string connectionId, IStreamSender sender)
         {
             sender.Track.Stop();
-            sender.SetSender(connectionId, null);
+            sender.SetTransceiver(connectionId, null);
             if (ExistConnection(connectionId))
                 RemoveTrack(connectionId, sender.Track);
         }
@@ -92,9 +128,10 @@ namespace Unity.RenderStreaming
         /// <param name="sender"></param>
         public void SetSenderCodecs(string connectionId, IStreamSender sender)
         {
-            var transceivers = m_handler.GetTransceivers(connectionId)
-                .Where(t => sender.Senders.Values.Contains(t.Sender));
-            sender.SetSenderCodec(connectionId, transceivers);
+            if(sender.Transceivers.TryGetValue(connectionId, out RTCRtpTransceiver value))
+            {
+                sender.SetSenderCodec(connectionId, value);
+            }
         }
 
         /// <summary>
@@ -104,10 +141,13 @@ namespace Unity.RenderStreaming
         /// <param name="receiver"></param>
         public virtual void AddReceiver(string connectionId, IStreamReceiver receiver)
         {
-            var transceiver =
-                m_handler.AddTransceiver(connectionId, receiver.Kind, RTCRtpTransceiverDirection.RecvOnly);
+            RTCRtpTransceiverInit init = new RTCRtpTransceiverInit()
+            {
+                direction = RTCRtpTransceiverDirection.RecvOnly
+            };
+            var transceiver = m_handler.AddTransceiver(connectionId, receiver.Kind, init);
             if (transceiver.Receiver != null)
-                receiver.SetReceiver(connectionId, transceiver.Receiver);
+                receiver.SetTransceiver(connectionId, transceiver);
         }
 
         /// <summary>
@@ -117,8 +157,7 @@ namespace Unity.RenderStreaming
         /// <param name="receiver"></param>
         public virtual void RemoveReceiver(string connectionId, IStreamReceiver receiver)
         {
-            //receiver.
-            receiver.SetReceiver(connectionId, null);
+            receiver.SetTransceiver(connectionId, null);
         }
 
         /// <summary>
@@ -129,7 +168,7 @@ namespace Unity.RenderStreaming
         public void SetReceiverCodecs(string connectionId, IStreamReceiver receiver)
         {
             var transceivers = m_handler.GetTransceivers(connectionId)
-                .Where(t => t.Receiver == receiver.Receiver);
+                .Where(t => t.Direction == RTCRtpTransceiverDirection.RecvOnly || t.Direction == RTCRtpTransceiverDirection.SendRecv);
             receiver.SetReceiverCodec(connectionId, transceivers);
         }
 
@@ -217,28 +256,28 @@ namespace Unity.RenderStreaming
     public interface IStreamSender
     {
         /// <summary>
-        ///
+        /// 
         /// </summary>
         MediaStreamTrack Track { get; }
 
         /// <summary>
-        ///
+        /// 
         /// </summary>
-        IReadOnlyDictionary<string, RTCRtpSender> Senders { get; }
+        IReadOnlyDictionary<string, RTCRtpTransceiver> Transceivers { get; }
 
         /// <summary>
-        ///
-        /// </summary>
-        /// <param name="connectionId"></param>
-        /// <param name="sender"></param>
-        void SetSender(string connectionId, RTCRtpSender sender);
-
-        /// <summary>
-        ///
+        /// 
         /// </summary>
         /// <param name="connectionId"></param>
         /// <param name="transceivers"></param>
-        void SetSenderCodec(string connectionId, IEnumerable<RTCRtpTransceiver> transceivers);
+        void SetSenderCodec(string connectionId, RTCRtpTransceiver transceiver);
+
+        /// <summary>
+        ///
+        /// </summary>
+        /// <param name="connectionId"></param>
+        /// <param name="transceiver"></param>
+        void SetTransceiver(string connectionId, RTCRtpTransceiver transceiver);
     }
 
     /// <summary>
@@ -254,7 +293,7 @@ namespace Unity.RenderStreaming
         /// <summary>
         ///
         /// </summary>
-        RTCRtpReceiver Receiver { get; }
+        RTCRtpTransceiver Transceiver { get; }
 
         /// <summary>
         ///
@@ -265,8 +304,8 @@ namespace Unity.RenderStreaming
         ///
         /// </summary>
         /// <param name="connectionId"></param>
-        /// <param name="receiver"></param>
-        void SetReceiver(string connectionId, RTCRtpReceiver receiver);
+        /// <param name="transceiver"></param>
+        void SetTransceiver(string connectionId, RTCRtpTransceiver transceiver);
 
         /// <summary>
         ///
